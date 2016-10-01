@@ -1,24 +1,30 @@
-const String progname = "ArduIR v0.1";
+#define PROGNAME    "ArduIR"
+#define PROGVERS    "0.1v"
 
 #include <avr/eeprom.h>
 #include <IRremote.h>
 
-// uncomment this line to debug 
-#define ARDUIR_DEBUG
+// uncomment the next line to debug 
+//#define ARDUIR_DEBUG
 
-// uncomment this line if using a Common Anode RGB LED
+// uncomment the line if using a Common Anode RGB LED
+// comment the line with '//' if using a Common Cathode RGB LED
 #define RGB_LED_COMMON_ANODE
 
 // set colcors for the RGB LED
 #define LED_OFF              setLedColor(0, 0, 0)
-#define LED_LIGHT_RED        setLedColor(255, 0, 0)
-#define LED_LIGHT_GREEN      setLedColor(0, 255, 0)
-#define LED_LIGHT_BLUE       setLedColor(0, 0, 255)
-#define LED_LIGHT_PURPLE     setLedColor(255, 0, 255)
-#define LED_LIGHT_YELLOW     setLedColor(255, 180, 0)
+#define LED_LIGHT_RED        setLedColor(255, 0, 0)   // device is off
+#define LED_LIGHT_GREEN      setLedColor(0, 255, 0)   // device is on
+#define LED_LIGHT_BLUE       setLedColor(0, 0, 255)   // incoming IR signal
+#define LED_LIGHT_PURPLE     setLedColor(255, 0, 255) // in menu mode
+#define LED_LIGHT_YELLOW     setLedColor(255, 180, 0) // check if device comes on
+
 
 // pin definition
-const uint8_t BUTTON_PIN = 5;
+// note: pin 3 is used for output in irremote
+const uint8_t NOT_USED_BUTTON_PIN = 2;
+const uint8_t POWER_BUTTON_PIN = 4;
+const uint8_t MENU_BUTTON_PIN = 5;
 const uint8_t POWERSTATE_PIN = 6;
 const uint8_t SWITCH_PIN = 7;
 const uint8_t RGB_LED_BLUE_PIN = 8;
@@ -263,7 +269,7 @@ int getMenuEntry() {
 
   waitTime = millis();
   while (waitForButtonPress == true) {
-    if (digitalRead(BUTTON_PIN) == LOW) {
+    if (digitalRead(MENU_BUTTON_PIN) == LOW) {
       if (buttonActive == false) {
         buttonActive = true;
         firstTime = millis();
@@ -272,7 +278,7 @@ int getMenuEntry() {
           i++;
           blinkLedPurple(1, 200);
           delay(200);
-          while (digitalRead(BUTTON_PIN) == LOW) {
+          while (digitalRead(MENU_BUTTON_PIN) == LOW) {
             blinkLedPurple(2, 200);
           }
           buttonActive = false;
@@ -290,6 +296,15 @@ int getMenuEntry() {
   }
   return i;
 }
+
+// Menumode
+// Menu 1: Save new button code to power up the device
+// Menu 2: Start the device when power is back
+//          0 - start device only with button code
+//          1 - start device with button code and when power is back
+// Menu 3:
+// Menu 4: Set brightness off the RGB LED
+// Menu 5: Delete all saved data
 
 void menuMode() {
   int menuEntry = 0;
@@ -373,16 +388,16 @@ void toggleTheSystem() {
   
   // sometimes the system won't start with the first action
   // so repeat it, the RGB LED will fading through the colors
-  while (digitalRead(POWERSTATE_PIN) == LOW && powerState == 0) {
-    delay(100);
-    p++;
-    if (p >= 10) {
-      digitalWrite(SWITCH_PIN, HIGH);
-      delay(400);
-      digitalWrite(SWITCH_PIN, LOW);
-      p = 0;
-    }
-  }
+//  while (digitalRead(POWERSTATE_PIN) == LOW && powerState == 0) {
+//    delay(100);
+//    p++;
+//    if (p >= 10) {
+//      digitalWrite(SWITCH_PIN, HIGH);
+//      delay(400);
+//      digitalWrite(SWITCH_PIN, LOW);
+//      p = 0;
+//    }
+//  }
 }
 
 void setup() {
@@ -390,7 +405,9 @@ void setup() {
   Serial.begin(9600);
   inputString.reserve(200);
   Serial.print(F("### "));
-  Serial.print(progname);
+  Serial.print(PROGNAME);
+  Serial.print(" ");
+  Serial.print(PROGVERS);
   Serial.println(F(" ###"));
   Serial.println(F("You are in debug mode"));
   Serial.println(F("Known commands: setbutton; showdata, deletedata"));
@@ -405,8 +422,10 @@ void setup() {
   LED_OFF;
   pinMode(SWITCH_PIN, OUTPUT);
   pinMode(POWERSTATE_PIN, INPUT);
-  pinMode(BUTTON_PIN, INPUT);
-  digitalWrite(BUTTON_PIN, HIGH);
+  pinMode(MENU_BUTTON_PIN, INPUT);
+  digitalWrite(MENU_BUTTON_PIN, HIGH);
+  pinMode(POWER_BUTTON_PIN, INPUT);
+  digitalWrite(POWER_BUTTON_PIN, HIGH);
   irrecv.enableIRIn();
   irrecv.blink13(false);
   delay(1000);
@@ -472,7 +491,7 @@ void loop() {
     }
   }
 
-  if (digitalRead(BUTTON_PIN) == LOW) {
+  if (digitalRead(MENU_BUTTON_PIN) == LOW) {
     oldPowerState = 2; // reset RGB LED to powerstate (green or red) after menu mode
     if (buttonActive == false) {
       buttonActive = true;
@@ -480,7 +499,7 @@ void loop() {
     } else {
       if (millis() - firstTime > menuHoldTime) {
         blinkLedPurple(2, 500);
-        while (digitalRead(BUTTON_PIN) == LOW) {
+        while (digitalRead(MENU_BUTTON_PIN) == LOW) {
           blinkLedPurple(2, 200);
         }
         buttonActive = false;
@@ -495,7 +514,7 @@ void loop() {
     checkCode(&results);
 
     // read new button code and save it, when different from stored code
-    // readNewButtonCode could only be set from menu, so we are in menu mode, LED is lighting yellow
+    // readNewButtonCode could only be set from menu, so we are in menu mode, LED is lighting purple
     if (readNewButtonCode) {
       blinkLedPurple(3, 30);
       if (codeValue != sram.value) {  // check new codeValue with stored value in sram
@@ -539,12 +558,12 @@ void loop() {
       } else {
         if (powerState == 1) {
           sendCode();
-          blinkLedBlue(3, 30);
+          blinkLedBlue(3, 20);
           LED_OFF;
           irrecv.enableIRIn(); // re-enable receiver
 #ifdef ARDUIR_DEBUG
         } else {
-          Serial.println(F("   Nothing send, powerstate is not 1!"));
+          Serial.println(F("   Nothing send to the device, powerstate is not 1!"));
 #endif
         }
       }
