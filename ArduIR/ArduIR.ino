@@ -5,7 +5,7 @@
 #include <IRremote.h>
 
 // uncomment the next line to debug 
-#define ARDUIR_DEBUG
+//#define ARDUIR_DEBUG
 
 // uncomment the line if using a Common Anode RGB LED
 // comment the line with '//' if using a Common Cathode RGB LED
