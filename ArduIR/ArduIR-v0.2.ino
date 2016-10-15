@@ -1,5 +1,5 @@
 #define PROGNAME    "ArduIR"
-#define PROGVERS    "0.1v"
+#define PROGVERS    "0.2"
 
 #include <avr/eeprom.h>
 #include <IRremote.h>
@@ -19,7 +19,7 @@
 #define LED_LIGHT_GREEN      setLedColor(0, 255, 0)   // color for device is on
 #define LED_LIGHT_BLUE       setLedColor(0, 0, 255)   // color for incoming IR signal
 #define LED_LIGHT_PURPLE     setLedColor(255, 0, 255) // color for menu mode
-#define LED_LIGHT_YELLOW     setLedColor(255, 170, 0) // color for check for the device comes up
+#define LED_LIGHT_YELLOW     setLedColor(255, 160, 0) // color for check for the device comes up
 
 
 
@@ -47,9 +47,9 @@ uint16_t menuActTime = 4000;       // how long should we wait in menu mode for a
 uint16_t holdTime = 200;           // time to hold the button for menu entries
 uint32_t firstTime = 0;
 bool waitForButtonPress = true;
-bool readNewButtonCode = false;
-bool inMenuMode = false;
-uint8_t purple = 0;
+bool readNewButtonCode = false;    // if true we will try to save the button code
+uint8_t purple = 0;                // for inverting the state of the purple LED
+
 
 
 
@@ -183,14 +183,16 @@ void checkIRCode(decode_results *results) {
     codeValue = codeValue | (sram.togglebit << (codeLen - 1));
   }
 #ifdef ARDUIR_DEBUG
-  Serial.print("<< " + codeTypeToString(codeType) + " received\tDEC: ");
+  Serial.print(F("<< "));
+  Serial.print(codeTypeToString(codeType));
+  Serial.print(F(" received\tDEC: "));
   Serial.print(codeValue, DEC);
-  Serial.print("\tHEX: ");
+  Serial.print(F("\tHEX: "));
   Serial.print(codeValue, HEX);
-  Serial.print("\tLength: ");
+  Serial.print(F("\tLength: "));
   Serial.print(codeLen, DEC);
   if (codeValue == sram.value) {
-    Serial.println("\t***");
+    Serial.println(F("\t***"));
   } else {
     Serial.println();
   }
@@ -214,11 +216,13 @@ void sendIRCode(void) {
     irsend.sendRaw(rawCodes, codeLen, 38); // Assume 38kHz
   }
 #ifdef ARDUIR_DEBUG
-  Serial.print(">> " + codeTypeToString(codeType) + " send\tDEC: ");
+  Serial.print(F(">> "));
+  Serial.print(codeTypeToString(codeType));
+  Serial.print(F(" send\tDEC: "));
   Serial.print(codeValue, DEC);
-  Serial.print("\tHEX: ");
+  Serial.print(F("\tHEX: "));
   Serial.print(codeValue, HEX);
-  Serial.print("\tLength: ");
+  Serial.print(F("\tLength: "));
   Serial.println(codeLen, DEC);
 #endif
 }
@@ -317,6 +321,9 @@ int getMenuEntry() {
     } else {
       if (millis() - waitTime > menuActTime) {
         if (i == 0) {
+#ifdef ARDUIR_DEBUG
+          Serial.println(F("No new entry, menu mode will be closed"));
+#endif
           blinkError();
         }
         waitForButtonPress = false;
@@ -327,18 +334,17 @@ int getMenuEntry() {
 }
 
 // Menumodes
-// Menu 1: Save new button code from the remote to power up the device
-// Menu 2: Start the device when power is back with submenuentry 1
+// Menu 1: Save new button code from the remote to power up the device - here is no submenu
+// Menu 2: Start the device when power is back with submenuentry 1 (inverts the state)
 //          0 - start device only with button code (default)
 //          1 - start device with button code and when power is back
 // Menu 3: change RC5/RC6 ToggleBit state with submenuentry 1
-// Menu 4: Set brightness off the RGB LED
+// Menu 4: Set brightness off the RGB LED, with the submenus
 // Menu 5: Delete all saved data with submenuentry 3
 
 void menuMode() {
   int menuEntry = 0;
   int subMenuEntry = 0;
-  inMenuMode = false;
   
 #ifdef ARDUIR_DEBUG
   Serial.println(F("Now in menu mode"));
@@ -352,6 +358,8 @@ void menuMode() {
     // show that we accept the entry
     blinkLedPurple(menuEntry, 400);
     LED_OFF;
+    delay(400);
+    LED_LIGHT_GREEN;
     delay(1000);
     LED_LIGHT_PURPLE;
   }
@@ -359,7 +367,6 @@ void menuMode() {
   switch (menuEntry) {
     case 1:
       readNewButtonCode = true;
-      inMenuMode = true;
 #ifdef ARDUIR_DEBUG
       Serial.println(F("Push a button that should be stored!"));
 #endif
@@ -447,18 +454,24 @@ void menuMode() {
 void startDevice() {
   unsigned int p = 0;
 
+#ifdef ARDUIR_DEBUG
+  Serial.println(F("   Try to starting device"));
+#endif
   LED_LIGHT_YELLOW;
   digitalWrite(SWITCH_PIN, HIGH);
-  delay(300);
+  delay(350);
   digitalWrite(SWITCH_PIN, LOW);
-  delay(2000);  // wait two second for the devices comes up
+  delay(2000);  // wait two seconds for the device to come up
 
   // sometimes the device won't start with the first action, so repeat it
   while (digitalRead(POWERSTATE_PIN) == LOW) {
+#ifdef ARDUIR_DEBUG
+  Serial.print(F("   Try to starting device again"));
+#endif
     blinkLedGreen(1, 200);
     LED_LIGHT_YELLOW;
     digitalWrite(SWITCH_PIN, HIGH);
-    delay(300);
+    delay(350);
     digitalWrite(SWITCH_PIN, LOW);
     p++;
     if (p == 5) {
@@ -467,6 +480,9 @@ void startDevice() {
     delay(2000);
   }
   if (digitalRead(POWERSTATE_PIN) == LOW) {
+#ifdef ARDUIR_DEBUG
+  Serial.print(F("   Starting the device failed"));
+#endif
     blinkError();
   }
   oldPowerState = 2; // reset RGB LED to powerstate (green or red)
@@ -486,12 +502,10 @@ void setup() {
   Serial.print(PROGVERS);
   Serial.println(F(" ###"));
   Serial.println(F("You are in debug mode"));
-  Serial.println(F("Known commands: setbutton; showdata, deletedata"));
+  Serial.println(F("Known commands: setbutton; showdata; deletedata"));
+  Serial.println();
 #endif
   restoreData();
-  if (sram.bright <= 50) {
-    sram.bright = 50;
-  }
   pinMode(RGB_LED_RED_PIN, OUTPUT);
   pinMode(RGB_LED_GREEN_PIN, OUTPUT);
   pinMode(RGB_LED_BLUE_PIN, OUTPUT);
@@ -513,12 +527,13 @@ void setup() {
 
 
 void loop() {
+
+  // incoming commands over serial
 #ifdef ARDUIR_DEBUG
   if (stringComplete) {
-    Serial.print(F("Received command "));
+    Serial.print(F("Received command:\t"));
     Serial.println(inputString);
     if (inputString.compareTo("setbutton") == 0 ) {
-      inMenuMode = true;
       readNewButtonCode = true;
       Serial.println(F("Push a button that should be stored!"));
     } else if (inputString.compareTo("showdata") == 0) {
@@ -558,14 +573,16 @@ void loop() {
   }
 #endif
 
-  // if the variable inMenuMode is true, then we are in menu mode and want to store a new code
-  // the LED should lighting purple
-  if (inMenuMode == true) {
+  // if we want to store a new button code then the LED will flashing purple,
+  // else read power state and set the RGB LED
+  if (readNewButtonCode) {
     purple = 1 - purple;
     if (purple == 0) {
       LED_OFF;
+      delay(50);
     } else {
       LED_LIGHT_PURPLE;
+      delay(50);
     }
   } else {
     powerState = digitalRead(POWERSTATE_PIN);
@@ -607,13 +624,14 @@ void loop() {
       if (sram.avail == 147) {
         codeType = sram.type;
         codeValue = sram.value;
-//        rawCodes[] = sram.rawcode[];
+//      TODO: read raw codes
         codeLen = sram.len;
         sendIRCode();
         blinkGood();
         LED_OFF;
         irrecv.enableIRIn(); // re-enable receiver
       } else {
+        // we have no saved data
         blinkError();
         LED_OFF;
       }
@@ -624,17 +642,16 @@ void loop() {
   // incomming IR signal
   if (irrecv.decode(&results)) {
     checkIRCode(&results);
-    blinkIR();
 
     // read the new button code and save it, when different from stored code
-    // readNewButtonCode could only be set from menu, so we are in menu mode, LED is lighting purple
     if (readNewButtonCode) {
+      blinkIR();
       if (codeValue != sram.value) {  // check new codeValue with stored value in sram
                                       // is it not the same then store it to eeprom
         sram.type = codeType;
         sram.value = codeValue;
         sram.len = codeLen;
-        // TODO: save raw codes
+//      TODO: save raw codes
         saveData();                   // here we save it
         delay(10);
         restoreData();                // read back the stored data from eepreom, and check it
@@ -662,11 +679,11 @@ void loop() {
 #endif
       }
       readNewButtonCode = false;
-      inMenuMode = false;
     // if we do not store a new button code, then we are in normal operating mode
     } else {
       if (powerState == 0) {
         if (codeType == sram.type && codeValue == sram.value && codeLen == sram.len) {
+          blinkIR();
           startDevice();
 #ifdef ARDUIR_DEBUG
         } else {
@@ -674,6 +691,7 @@ void loop() {
 #endif
         }
       } else {
+        blinkIR();
         sendIRCode();
         irrecv.enableIRIn(); // re-enable receiver
       }
@@ -681,5 +699,6 @@ void loop() {
     irrecv.resume();   // receive the next value
     oldPowerState = 2; // reset RGB LED to powerstate (green or red)
   }
-  delay(20);
+  delay(5);
 }
+
