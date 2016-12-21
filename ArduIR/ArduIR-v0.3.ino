@@ -1,5 +1,5 @@
 #define PROGNAME    "ArduIR"
-#define PROGVERS    "0.2"
+#define PROGVERS    "0.3"
 
 #include <avr/eeprom.h>
 #include <IRremote.h>
@@ -19,16 +19,27 @@
 #define LED_LIGHT_GREEN      setLedColor(0, 255, 0)   // color for device is on
 #define LED_LIGHT_BLUE       setLedColor(0, 0, 255)   // color for incoming IR signal
 #define LED_LIGHT_PURPLE     setLedColor(255, 0, 255) // color for menu mode
-#define LED_LIGHT_YELLOW     setLedColor(255, 160, 0) // color for check for the device comes up
+#define LED_LIGHT_CYAN       setLedColor(0, 255, 255) // color for check for the device comes up
 
+
+
+// Menumodes
+// Menu 1: Save new button code from the remote to power up the device - here is no submenu
+// Menu 2: Start the device when power is back with submenuentry 1 (inverts the state)
+//          0 - start device only with button code (default)
+//          1 - start device with button code and when power is back
+// Menu 3: change RC5/RC6 ToggleBit state with submenuentry 1
+// Menu 4: Set brightness off the RGB LED, with the submenus
+// Menu 5: Delete all saved data with submenuentry 3
+#define MAX_MENU_MODES  5
 
 
 
 // pin definition
 // note: pin 3 is used as output in IRremote, so we can not use them
-const uint8_t NOT_USED_BUTTON_PIN = 4;
 const uint8_t POWER_BUTTON_PIN = 10;
-const uint8_t MENU_BUTTON_PIN = 8;
+const uint8_t DOWN_BUTTON_PIN = 8;
+const uint8_t UP_BUTTON_PIN = 4;
 const uint8_t POWERSTATE_PIN = 7;
 const uint8_t SWITCH_PIN = 2;
 const uint8_t RGB_LED_BLUE_PIN = 5;
@@ -38,17 +49,20 @@ const uint8_t RECV_PIN = 11;
 
 // powerstate
 uint8_t powerState = 0;
-uint8_t oldPowerState = 2;         // 0 => off; 1 => on; 2 => reset RGB LED to powerState value
+uint8_t oldPowerState = 2;           // 0 => off; 1 => on; 2 => reset RGB LED to powerState value
 
 // button and menu variable
-bool buttonActive = false;         // true if button is pushed
-uint16_t menuHoldTime = 2000;      // time to hold the button to activate the menu mode
-uint16_t menuActTime = 4000;       // how long should we wait in menu mode for a button press
-uint16_t holdTime = 200;           // time to hold the button for menu entries
+bool buttonActive = false;           // true if button is pushed
+uint16_t shutdownHoldTime = 10000;   // time to hold the button to hard power off the device
+uint16_t warningHoldTime = 7000;     // time to hold the button when the LED will blinking RED
+uint16_t menuHoldTime = 5000;        // time to hold the button to activate the menu mode
+uint16_t menuActiveTime = 5000;      // how long we should wait in menu mode for a button press
+uint16_t buttonHoldTime = 200;       // time to hold the button to get recognized
+uint16_t newIrCodeWaitTime = 20000;  // how long we should wait to receive an new ir code
+uint32_t firstNewIrCodeTime = 0;
 uint32_t firstTime = 0;
 bool waitForButtonPress = true;
-bool readNewButtonCode = false;    // if true we will try to save the button code
-uint8_t purple = 0;                // for inverting the state of the purple LED
+bool readNewIrCode = false;          // if true we will try to save a new ir button code
 
 
 
@@ -68,21 +82,21 @@ int16_t codeLen;                     // IR length of the code
 
 
 // EEPROM & SRAM data
-#define INIT_DATA                    {116, -1, 12345, 11011, 1, 22, 0, 80}  // initial data if nothing is stored correctly
-                                                                            // first value set the availabilty:
-                                                                            //     85 - data was deleted
-                                                                            //    116 - initial data
-                                                                            //    147 - correctly saved data
+#define INIT_DATA                    {116, -1, 12345, 11011, 1, 22, 0, 80}  // initial data, if nothing is stored correctly
+
 
 typedef struct s_eeprom {
-  uint8_t avail;                      // have we ever saved the data?
-  int8_t type;                        // saved type of the IR code (RC5, RC6, NEC, etc.; 0 or -1 = type is UNKNOWN)
-  int32_t value;                      // saved value of the IR code if not raw
-  uint16_t rawcode;                   // saved durations of the IR code if raw
+  uint8_t avail;                      // have we ever saved the data? - this first value set the availabilty:
+                                        //   85 - data was deleted
+                                        //  116 - initial data
+                                        //  147 - correctly saved data
+  int8_t type;                        // type of the IR code (RC5, RC6, NEC, etc.; 0 or -1 = type is UNKNOWN)
+  int32_t value;                      // value of the IR code if not raw
+  uint16_t rawcode;                   // durations of the IR code if raw
   uint8_t togglebit;                  // RC5/6 toggle bit state (0 = don't touch the bit; 1 = set bit to 1)
   int16_t len;                        // length if the IR code
   uint8_t startsys;                   // do we want to start the device after power comes back?
-  uint8_t bright;                     // saved value for the brightness of the RGB LED
+  uint8_t bright;                     // value for the brightness of the RGB LED
 } SAVED_DATA;
 
 SAVED_DATA EEMEM eeprom = INIT_DATA;  // data in eeprom
@@ -104,8 +118,8 @@ void saveData(void){
 
 void deleteData(void) {
   sram.avail = 85;  // override the availability
-  saveData();       // save date from sram
-  restoreData();    // availablity 85 set data in sram to init_data
+  saveData();       // save data to eeprom from sram
+  restoreData();    // restore data - if availablity is not 147, then load init_data
 #ifdef ARDUIR_DEBUG
   Serial.println("Deleted saved data!");
 #endif
@@ -281,94 +295,138 @@ void blinkLedPurple(int p, int d) {
 }
 
 void blinkIR() {
-  blinkLedBlue(4, 20);
+  blinkLedBlue(2, 20);
 }
 
 void blinkGood() {
-  blinkLedGreen(2, 500);
+  blinkLedGreen(2, 400);
 }
 
 void blinkError() {
-  blinkLedRed(4, 200);
+  blinkLedRed(4, 100);
 }
 
+void blinkButtonError() {
+  blinkLedRed(2, 100);
+}
 
+void blinkMenuMode() {
+  blinkLedPurple(1, 400);
+}
 
 
 int getMenuEntry() {
   unsigned long waitTime;
   int i = 0;
   bool waitForButtonPress = true;
+  bool buttonUpActive = false;
+  bool buttonDownActive = false;
+  bool buttonPowerActive = false;
 
+  LED_LIGHT_PURPLE;
+#ifdef ARDUIR_DEBUG
+  Serial.println(F("## Please slect an menu entry"));
+#endif
   waitTime = millis();
   while (waitForButtonPress == true) {
-    if (digitalRead(MENU_BUTTON_PIN) == LOW) {
-      if (buttonActive == false) {
-        buttonActive = true;
+    if (digitalRead(UP_BUTTON_PIN) == LOW) {
+      if ((buttonUpActive == false) && (buttonDownActive == false) && (buttonPowerActive == false)) {
+        buttonUpActive = true;
         firstTime = millis();
       } else {
-        if (millis() - firstTime > holdTime) {
+        if (millis() - firstTime > buttonHoldTime) {
           i++;
-          blinkLedPurple(1, 500);
-          // if the button was not realeased, let blink the LED purple
-          while (digitalRead(MENU_BUTTON_PIN) == LOW) {
-            blinkLedPurple(2, 200);
+          blinkMenuMode();
+          // if the button was not realeased, let blink the LED red
+          while (digitalRead(UP_BUTTON_PIN) == LOW) {
+            blinkButtonError();
           }
-          buttonActive = false;
+          buttonUpActive = false;
           waitTime = millis();
         }
       }
-    } else {
-      if (millis() - waitTime > menuActTime) {
-        if (i == 0) {
-#ifdef ARDUIR_DEBUG
-          Serial.println(F("No new entry, menu mode will be closed"));
-#endif
-          blinkError();
+    }
+    if (digitalRead(DOWN_BUTTON_PIN) == LOW) {
+      if ((buttonUpActive == false) && (buttonDownActive == false) && (buttonPowerActive == false)) {
+        buttonDownActive = true;
+        firstTime = millis();
+      } else {
+        if (millis() - firstTime > buttonHoldTime) {
+          if (i <= 0) {
+            i = 0;
+          } else {
+            i--;
+          }
+          blinkMenuMode();
+          // if the button was not realeased, let blink the LED red
+          while (digitalRead(DOWN_BUTTON_PIN) == LOW) {
+            blinkButtonError();
+          }
+          buttonDownActive = false;
+          waitTime = millis();
         }
-        waitForButtonPress = false;
       }
+    }
+    if (digitalRead(POWER_BUTTON_PIN) == LOW) {
+      if ((buttonUpActive == false) && (buttonDownActive == false) && (buttonPowerActive == false)) {
+        buttonPowerActive = true;
+        firstTime = millis();
+      } else {
+        if (millis() - firstTime > buttonHoldTime) {
+          LED_OFF;
+          delay(800);
+          // if the button was not realeased, let blink the LED red
+          while (digitalRead(POWER_BUTTON_PIN) == LOW) {
+            blinkButtonError();
+          }
+          buttonPowerActive = false;
+          waitForButtonPress = false;
+        }
+      }
+    }
+    if (millis() - waitTime > menuActiveTime) {
+#ifdef ARDUIR_DEBUG
+      Serial.println(F("!! Menu mode timed out, because no new button has been pressed!"));
+#endif
+      blinkError();
+      i = 0;
+      waitForButtonPress = false;
     }
   }
   return i;
 }
 
-// Menumodes
-// Menu 1: Save new button code from the remote to power up the device - here is no submenu
-// Menu 2: Start the device when power is back with submenuentry 1 (inverts the state)
-//          0 - start device only with button code (default)
-//          1 - start device with button code and when power is back
-// Menu 3: change RC5/RC6 ToggleBit state with submenuentry 1
-// Menu 4: Set brightness off the RGB LED, with the submenus
-// Menu 5: Delete all saved data with submenuentry 3
+
+
 
 void menuMode() {
   int menuEntry = 0;
   int subMenuEntry = 0;
-  
+
 #ifdef ARDUIR_DEBUG
-  Serial.println(F("Now in menu mode"));
+  Serial.println(F("## Menu mode active"));
 #endif
   menuEntry = getMenuEntry();
 #ifdef ARDUIR_DEBUG
-  Serial.print(F("Selected menu entry: "));
+  Serial.print(F("?? Selected entry in main menu: "));
   Serial.println(menuEntry);
 #endif
-  if (menuEntry != 0 && menuEntry <= 5) {
+  if (menuEntry >= 0 && menuEntry <= MAX_MENU_MODES) {
     // show that we accept the entry
+    delay(500);
     blinkLedPurple(menuEntry, 400);
     LED_OFF;
-    delay(400);
+    delay(500);
     LED_LIGHT_GREEN;
     delay(1000);
-    LED_LIGHT_PURPLE;
   }
   
   switch (menuEntry) {
     case 1:
-      readNewButtonCode = true;
+      readNewIrCode = true;
+      firstNewIrCodeTime = millis();
 #ifdef ARDUIR_DEBUG
-      Serial.println(F("Push a button that should be stored!"));
+      Serial.println(F("[] Push a button on your ir remote, that should be stored!"));
 #endif
       break;
     case 2:
@@ -392,39 +450,33 @@ void menuMode() {
       }
       break;
     case 4:
-      subMenuEntry = getMenuEntry();
-      switch (subMenuEntry) {
-        case 1:
-          sram.bright = 40;
-          break;
-        case 2:
-          sram.bright = 50;
-          break;
-        case 3:
-          sram.bright = 60;
-          break;
-        case 4:
-          sram.bright = 70;
-          break;
-        case 5:
-          sram.bright = 80;
-          break;
-        case 6:
-          sram.bright = 90;
-          break;
-        case 7:
-          sram.bright = 100;
-          break;
-        default:
-          subMenuEntry = 0;
-          break;
+      while (digitalRead(POWER_BUTTON_PIN) == HIGH) {
+        if (digitalRead(UP_BUTTON_PIN) == LOW) {
+          if (sram.bright >= 100) {
+            sram.bright = 100;
+          } else {
+            sram.bright++;
+          }
+        }
+        if (digitalRead(DOWN_BUTTON_PIN) == LOW) {
+          if (sram.bright <= 0) {
+            sram.bright = 0;
+          } else {
+            sram.bright--;
+          }
+        }
+        LED_LIGHT_PURPLE;  // set RGB LED to the selected brightness
+        delay(20);
       }
-      if (subMenuEntry != 0) {
-        saveData();
-        blinkGood();
-      } else {
-        blinkError();
+      LED_OFF;
+      delay(500);
+      while (digitalRead(POWER_BUTTON_PIN) == LOW) {
+        blinkButtonError();
       }
+      LED_OFF;
+      delay(500);
+      saveData();
+      blinkGood();
       break;
     case 5:
       subMenuEntry = getMenuEntry();
@@ -442,7 +494,7 @@ void menuMode() {
       break;
     default:
 #ifdef ARDUIR_DEBUG
-     Serial.println(F("Entry in menu does not exist!"));
+     Serial.println(F("!! Entry in main menu does not exist!"));
 #endif
       blinkError();
       break;
@@ -455,9 +507,9 @@ void startDevice() {
   unsigned int p = 0;
 
 #ifdef ARDUIR_DEBUG
-  Serial.println(F("   Try to starting device"));
+  Serial.println(F("** Try to starting device"));
 #endif
-  LED_LIGHT_YELLOW;
+  LED_LIGHT_CYAN;
   digitalWrite(SWITCH_PIN, HIGH);
   delay(350);
   digitalWrite(SWITCH_PIN, LOW);
@@ -466,10 +518,10 @@ void startDevice() {
   // sometimes the device won't start with the first action, so repeat it
   while (digitalRead(POWERSTATE_PIN) == LOW) {
 #ifdef ARDUIR_DEBUG
-  Serial.print(F("   Try to starting device again"));
+  Serial.println(F("** Try to starting device again"));
 #endif
     blinkLedGreen(1, 200);
-    LED_LIGHT_YELLOW;
+    LED_LIGHT_CYAN;
     digitalWrite(SWITCH_PIN, HIGH);
     delay(350);
     digitalWrite(SWITCH_PIN, LOW);
@@ -481,13 +533,29 @@ void startDevice() {
   }
   if (digitalRead(POWERSTATE_PIN) == LOW) {
 #ifdef ARDUIR_DEBUG
-  Serial.print(F("   Starting the device failed"));
+  Serial.println(F("!! Starting the device failed"));
 #endif
     blinkError();
+    LED_OFF;
+    delay(1000);
   }
-  oldPowerState = 2; // reset RGB LED to powerstate (green or red)
 }
 
+
+
+void stopDevice() {
+#ifdef ARDUIR_DEBUG
+  Serial.println(F("** Stopping device hard"));
+#endif
+  LED_LIGHT_CYAN;
+  digitalWrite(SWITCH_PIN, HIGH);
+  while (digitalRead(POWERSTATE_PIN) == HIGH) {
+    delay(100); // wait 100ms
+  }
+  digitalWrite(SWITCH_PIN, LOW);
+  LED_OFF;
+  delay(2000);  // wait two seconds
+}
 
 
 
@@ -512,8 +580,10 @@ void setup() {
   LED_OFF;  // set LED off
   pinMode(SWITCH_PIN, OUTPUT);
   pinMode(POWERSTATE_PIN, INPUT);
-  pinMode(MENU_BUTTON_PIN, INPUT);
-  digitalWrite(MENU_BUTTON_PIN, HIGH);
+  pinMode(UP_BUTTON_PIN, INPUT);
+  digitalWrite(UP_BUTTON_PIN, HIGH);
+  pinMode(DOWN_BUTTON_PIN, INPUT);
+  digitalWrite(DOWN_BUTTON_PIN, HIGH);
   pinMode(POWER_BUTTON_PIN, INPUT);
   digitalWrite(POWER_BUTTON_PIN, HIGH);
   irrecv.enableIRIn();
@@ -528,14 +598,107 @@ void setup() {
 
 void loop() {
 
-  // incoming commands over serial
+
+  // read device powerstate
+  powerState = digitalRead(POWERSTATE_PIN);
+
+
+  // LED color
+  // if we want to store a new button code then the LED will lightning blue,
+  // else set the RGB LED to device powerstate
+  if (readNewIrCode == true) {
+    if (millis() - firstNewIrCodeTime > newIrCodeWaitTime) {
 #ifdef ARDUIR_DEBUG
+        Serial.println(F("!! Read new ir code from remote timed out!"));
+#endif
+        readNewIrCode = false;
+        oldPowerState = 2;  // reset RGB LED to powerstate (green or red)
+    } else {
+      LED_LIGHT_BLUE;
+    }
+  } else {
+    if (powerState != oldPowerState) {
+      if (powerState == 0) {
+        LED_LIGHT_RED;
+      } else {
+        LED_LIGHT_GREEN;
+      }
+      oldPowerState = powerState;
+    }
+  }
+
+
+  // incomming IR signal
+  if (irrecv.decode(&results)) {
+    checkIRCode(&results);
+
+    // read the new button code and save it, when different from stored code
+    if (readNewIrCode == true) {
+      blinkIR();
+      if (codeValue != sram.value) {  // check new codeValue with stored value in sram
+                                      // is it not the same then store it to eeprom
+        sram.type = codeType;
+        sram.value = codeValue;
+        sram.len = codeLen;
+//      TODO: save raw codes
+        saveData();                   // here we save it
+        delay(10);
+        restoreData();                // read back the stored data from eepreom, and check it
+        if (codeValue != sram.value || codeType != sram.type) {
+          blinkError();        // button code could not be stored
+#ifdef ARDUIR_DEBUG
+          Serial.println(F("!! New code could not be stored from remote! Something went wrong!"));
+          Serial.print(F(" Got: "));
+          Serial.print(codeTypeToString(codeType) + " ");
+          Serial.println(codeValue, DEC);
+          Serial.print(F(" Stored: "));
+          Serial.print(codeTypeToString(sram.type) + " ");
+          Serial.println(sram.value, DEC);
+#endif
+        } else {                      // button code could be stored
+          blinkGood();
+#ifdef ARDUIR_DEBUG
+          Serial.println(F("** Stored new code from remote!"));
+#endif
+        }
+      } else {                       // button code is the same as stored
+        blinkGood();
+#ifdef ARDUIR_DEBUG  
+        Serial.println(F("** The new button code was not updated, same as stored!"));
+#endif
+      }
+      readNewIrCode = false;
+    // if we do not store a new button code, then we are in normal operating mode
+    } else {
+      if (powerState == 0) {
+        if (codeType == sram.type && codeValue == sram.value && codeLen == sram.len) {
+          blinkIR();
+          startDevice();
+#ifdef ARDUIR_DEBUG
+        } else {
+          Serial.println(F("!! Nothing send to the device, because device is off!"));
+#endif
+        }
+      } else {
+        sendIRCode();
+        blinkIR();
+        irrecv.enableIRIn(); // re-enable receiver
+      }
+    }
+    irrecv.resume();   // receive the next value
+    oldPowerState = 2; // reset RGB LED to powerstate (green or red)
+  }
+
+ 
+#ifdef ARDUIR_DEBUG
+   // incoming commands over serial
   if (stringComplete) {
-    Serial.print(F("Received command:\t"));
+    Serial.print(F("** Received command:\t"));
     Serial.println(inputString);
     if (inputString.compareTo("setbutton") == 0 ) {
-      readNewButtonCode = true;
-      Serial.println(F("Push a button that should be stored!"));
+      readNewIrCode = true;
+      firstNewIrCodeTime = millis();
+      Serial.println(F("[] Push a button on your ir remote, that should be stored!"));
     } else if (inputString.compareTo("showdata") == 0) {
       if (sram.avail == 147) {
         Serial.println(F("Saved data:"));
@@ -561,144 +724,82 @@ void loop() {
         Serial.print(F("\tBrightness LED:\t\t"));
         Serial.println(sram.bright);
       } else {
-        Serial.println(F("No saved data available!"));
+        Serial.println(F("!! No saved data available!"));
       }
     } else if (inputString.compareTo("deletedata") == 0) {
       deleteData();
     } else {
-      Serial.println(F(" - Unknown command!"));
+      Serial.println(F("!! Unknown command!"));
     }
     inputString = ""; // clear the string
     stringComplete = false;
   }
 #endif
 
-  // if we want to store a new button code then the LED will flashing purple,
-  // else read power state and set the RGB LED
-  if (readNewButtonCode) {
-    purple = 1 - purple;
-    if (purple == 0) {
-      LED_OFF;
-      delay(50);
-    } else {
-      LED_LIGHT_PURPLE;
-      delay(50);
-    }
-  } else {
-    powerState = digitalRead(POWERSTATE_PIN);
-    if (powerState != oldPowerState) {
-      if (powerState == 0) {
-        LED_LIGHT_RED;
-      } else {
-        LED_LIGHT_GREEN;
-      }
-      oldPowerState = powerState;
-    }
-  }
 
-  // menu button is pressed
-  if (digitalRead(MENU_BUTTON_PIN) == LOW) {
+  // power button is pressed
+  if (digitalRead(POWER_BUTTON_PIN) == LOW) {
     if (buttonActive == false) {
       buttonActive = true;
       firstTime = millis();
     } else {
       if (millis() - firstTime > menuHoldTime) {
-        blinkLedPurple(1, 500);
-        while (digitalRead(MENU_BUTTON_PIN) == LOW) {
-          blinkLedPurple(2, 200);
+        while (digitalRead(POWER_BUTTON_PIN) == LOW) {
+          if (millis() - firstTime > warningHoldTime) {
+            blinkError();
+          } else {
+            blinkLedPurple(2, 200);
+          }
+          if (millis() - firstTime > shutdownHoldTime) {
+            buttonActive = false;
+            LED_LIGHT_RED;
+            delay(1000);
+            while (digitalRead(POWER_BUTTON_PIN) == LOW) {
+              blinkButtonError();
+            }
+            stopDevice();
+          }
         }
-        buttonActive = false;
-        menuMode();  // call menuMode()
-      }
+        if (buttonActive == true) {
+          buttonActive = false;
+          menuMode();  // call menuMode()
+        }
+        oldPowerState = 2; // reset RGB LED to powerstate (green or red)
+      }   
     }
-    oldPowerState = 2; // reset RGB LED to powerstate (green or red)
-  } else {
-    buttonActive = false;
   }
 
-  // power button is pressed
-  if (digitalRead(POWER_BUTTON_PIN) == LOW) {
-    if (powerState == 0) {
-      startDevice();
-    } else {
-      if (sram.avail == 147) {
-        codeType = sram.type;
-        codeValue = sram.value;
-//      TODO: read raw codes
-        codeLen = sram.len;
-        sendIRCode();
-        blinkGood();
-        LED_OFF;
-        irrecv.enableIRIn(); // re-enable receiver
+  // power button has released
+  if ((digitalRead(POWER_BUTTON_PIN) == HIGH) && (buttonActive == true)) {
+    buttonActive = false;
+    if (millis() - firstTime > buttonHoldTime) {
+      if (readNewIrCode == true) {
+        readNewIrCode = false;
       } else {
-        // we have no saved data
-        blinkError();
-        LED_OFF;
+        if (powerState == 0) {
+          startDevice();
+        } else {
+          if (sram.avail == 147) {
+            codeType = sram.type;
+            codeValue = sram.value;
+//          TODO: read raw codes
+            codeLen = sram.len;
+            sendIRCode();
+            blinkGood();
+            LED_OFF;
+            irrecv.enableIRIn(); // re-enable receiver
+          } else {
+            // we have no saved data
+            blinkError();
+            LED_OFF;
+          }
+        }
       }
       oldPowerState = 2; // reset RGB LED to powerstate (green or red)
     }
   }
 
-  // incomming IR signal
-  if (irrecv.decode(&results)) {
-    checkIRCode(&results);
 
-    // read the new button code and save it, when different from stored code
-    if (readNewButtonCode) {
-      blinkIR();
-      if (codeValue != sram.value) {  // check new codeValue with stored value in sram
-                                      // is it not the same then store it to eeprom
-        sram.type = codeType;
-        sram.value = codeValue;
-        sram.len = codeLen;
-//      TODO: save raw codes
-        saveData();                   // here we save it
-        delay(10);
-        restoreData();                // read back the stored data from eepreom, and check it
-        if (codeValue != sram.value || codeType != sram.type) {
-          blinkError();        // button code could not be stored
-#ifdef ARDUIR_DEBUG
-          Serial.println(F("New code could not be stored from remote! Something went wrong!"));
-          Serial.print(F(" Got: "));
-          Serial.print(codeTypeToString(codeType) + " ");
-          Serial.println(codeValue, DEC);
-          Serial.print(F(" Stored: "));
-          Serial.print(codeTypeToString(sram.type) + " ");
-          Serial.println(sram.value, DEC);
-#endif
-        } else {                      // button code could be stored
-          blinkGood();
-#ifdef ARDUIR_DEBUG
-          Serial.println(F("Stored new code from remote!"));
-#endif
-        }
-      } else {                       // button code is the same as stored
-        blinkGood();
-#ifdef ARDUIR_DEBUG  
-        Serial.println(F("The new button code was not updated, same as stored!"));
-#endif
-      }
-      readNewButtonCode = false;
-    // if we do not store a new button code, then we are in normal operating mode
-    } else {
-      if (powerState == 0) {
-        if (codeType == sram.type && codeValue == sram.value && codeLen == sram.len) {
-          blinkIR();
-          startDevice();
-#ifdef ARDUIR_DEBUG
-        } else {
-          Serial.println(F("   Nothing send to the device, because device is off!"));
-#endif
-        }
-      } else {
-        blinkIR();
-        sendIRCode();
-        irrecv.enableIRIn(); // re-enable receiver
-      }
-    }
-    irrecv.resume();   // receive the next value
-    oldPowerState = 2; // reset RGB LED to powerstate (green or red)
-  }
   delay(5);
 }
 
